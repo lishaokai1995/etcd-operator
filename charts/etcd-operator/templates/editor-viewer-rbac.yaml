@@ -1,0 +1,99 @@
+{{- if and .Values.rbac.create .Values.rbac.editorViewerRoles }}
+# 面向最终用户的辅助角色（operator 自身不使用，可按需关闭）
+{{- $labels := include "etcd-operator.labels" . }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "etcd-operator.fullname" . }}-etcdcluster-editor-role
+  labels:
+    {{- $labels | nindent 4 }}
+rules:
+  - apiGroups:
+      - operator.etcd.io
+    resources:
+      - etcdclusters
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - operator.etcd.io
+    resources:
+      - etcdclusters/status
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "etcd-operator.fullname" . }}-etcdcluster-viewer-role
+  labels:
+    {{- $labels | nindent 4 }}
+rules:
+  - apiGroups:
+      - operator.etcd.io
+    resources:
+      - etcdclusters
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - operator.etcd.io
+    resources:
+      - etcdclusters/status
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "etcd-operator.fullname" . }}-etcdmember-editor-role
+  labels:
+    {{- $labels | nindent 4 }}
+rules:
+  - apiGroups:
+      - operator.etcd.io
+    resources:
+      - etcdmembers
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - operator.etcd.io
+    resources:
+      - etcdmembers/status
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "etcd-operator.fullname" . }}-etcdmember-viewer-role
+  labels:
+    {{- $labels | nindent 4 }}
+rules:
+  - apiGroups:
+      - operator.etcd.io
+    resources:
+      - etcdmembers
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - operator.etcd.io
+    resources:
+      - etcdmembers/status
+    verbs:
+      - get
+{{- end }}

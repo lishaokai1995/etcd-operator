@@ -282,6 +282,15 @@ func (ac *Provider) createNewSecret(ctx context.Context, secretKey client.Object
 				hosts = append(hosts, hostPort)
 			}
 		}
+		for _, ip := range cfg.AltNames.IPs {
+			if ip == nil {
+				continue
+			}
+			// transport.SelfCert 会把可解析为 IP 的 host 写入证书的 IPAddresses SAN，
+			// 使客户端可以用 "https://<ip>:port" 直连并通过主机名校验。
+			hostPort := net.JoinHostPort(ip.String(), "5500")
+			hosts = append(hosts, hostPort)
+		}
 	}
 
 	log.Printf("calling SelfCert with hosts: %v", hosts)

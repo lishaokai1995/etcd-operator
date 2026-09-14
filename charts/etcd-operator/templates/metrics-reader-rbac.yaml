@@ -1,0 +1,15 @@
+{{- if .Values.rbac.create }}
+# 允许读取 /metrics 的非资源 URL 权限，授予 Prometheus 等抓取方
+# （config/rbac/metrics_reader_role.yaml）
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "etcd-operator.fullname" . }}-metrics-reader
+  labels:
+    {{- include "etcd-operator.labels" . | nindent 4 }}
+rules:
+  - nonResourceURLs:
+      - "/metrics"
+    verbs:
+      - get
+{{- end }}

@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "etcd-operator.fullname" . }}
+  namespace: {{ include "etcd-operator.namespace" . }}
+  labels:
+    control-plane: controller-manager
+    {{- include "etcd-operator.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+      {{- include "etcd-operator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        control-plane: controller-manager
+        {{- include "etcd-operator.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "etcd-operator.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: manager
+          command:
+            - /manager
+          args:
+            {{- if .Values.leaderElection.enabled }}
+            - --leader-elect
+            {{- end }}
+            - --health-probe-bind-address={{ .Values.healthProbe.bindAddress }}
+            {{- if ne (toString .Values.metrics.bindAddress) "0" }}
+            - --metrics-bind-address={{ .Values.metrics.bindAddress }}
+            {{- if not .Values.metrics.secure }}
+            - --metrics-secure=false
+            {{- end }}
+            {{- end }}
+            - --image-registry={{ .Values.etcdImageRegistry }}
+            {{- with .Values.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          image: {{ include "etcd-operator.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- with .Values.env }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

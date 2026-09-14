@@ -1,0 +1,20 @@
+{{- if .Values.metrics.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "etcd-operator.fullname" . }}-metrics-service
+  namespace: {{ include "etcd-operator.namespace" . }}
+  labels:
+    control-plane: controller-manager
+    {{- include "etcd-operator.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.metrics.service.type }}
+  ports:
+    - name: https
+      port: 8443
+      protocol: TCP
+      targetPort: 8443
+  selector:
+    control-plane: controller-manager
+    {{- include "etcd-operator.selectorLabels" . | nindent 4 }}
+{{- end }}

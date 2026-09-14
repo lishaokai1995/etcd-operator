@@ -1,0 +1,120 @@
+# etcd-operator Helm Chart 默认值
+# 内容与 config/default（kustomize）渲染结果对齐，可变项均已参数化。
+
+# -- 全局名称覆盖
+nameOverride: ""
+fullnameOverride: ""
+
+# 命名空间策略：
+#   create=false（默认）：所有资源安装到 .Release.Namespace，
+#     推荐 helm install -n etcd-operator-system --create-namespace
+#   create=true：自动创建并安装到 namespace.name（与 kustomize 的
+#     etcd-operator-system 行为一致，无需 --create-namespace）
+namespace:
+  create: false
+  name: etcd-operator-system
+
+# 控制器镜像
+# 本地构建镜像（需在有 Docker 的机器上执行，然后 docker push）：
+#   make docker-build docker-push IMG=<registry>/etcd-operator:<tag>
+image:
+  registry: ""            # 例如 "docker.io/library"、私有仓库 host；为空则直接用 repository
+  repository: etcd-operator
+  tag: ""                 # 留空使用 .Chart.AppVersion（v0.1.0）
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# operator 管理的 etcd 集群使用的镜像仓库，通过 --image-registry 传给控制器，
+# 默认与上游二进制默认值一致
+etcdImageRegistry: gcr.io/etcd-development/etcd
+
+replicaCount: 1
+
+leaderElection:
+  # 为 true 时给控制器加 --leader-elect 参数
+  enabled: true
+
+# 控制器自身 /metrics 暴露方式
+metrics:
+  # 对应 --metrics-bind-address；"0" 表示禁用 metrics
+  bindAddress: ":8443"
+  # true（默认）时走 HTTPS + authn/authz 保护；false 走 HTTP
+  secure: true
+  service:
+    # 是否创建 metrics Service
+    enabled: true
+    type: ClusterIP
+  serviceMonitor:
+    # 需要 Prometheus Operator CRD；同时要求 metrics.service.enabled=true
+    enabled: false
+    interval: ""
+    # 追加到 ServiceMonitor 的 labels，例如用于 Prometheus Operator 的 selector 发现
+    extraLabels: {}
+
+healthProbe:
+  # 对应 --health-probe-bind-address（/healthz 与 /readyz）
+  bindAddress: ":8081"
+
+# 传递给 /manager 的额外命令行参数，例如 ["--enable-http2=true"]
+extraArgs: []
+
+# 传给控制器的额外环境变量
+env: []
+
+serviceAccount:
+  create: true
+  # 留空自动生成 fullname；serviceAccount.create=false 时可直接指定已有 SA 名
+  name: ""
+  annotations: {}
+
+rbac:
+  create: true
+  # 是否安装面向最终用户的 etcdcluster/etcdmember editor/viewer ClusterRole
+  # （上游 config/rbac 中的辅助角色，operator 自身不使用）
+  editorViewerRoles: true
+
+podAnnotations:
+  kubectl.kubernetes.io/default-container: manager
+
+# 额外的 Pod 标签（control-plane: controller-manager 与 selector 标签已由模板内置）
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# 与上游 manager.yaml 保持一致
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+
+livenessProbe:
+  initialDelaySeconds: 15
+  periodSeconds: 20
+readinessProbe:
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+terminationGracePeriodSeconds: 10
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# 保护 /metrics 端口的 NetworkPolicy（默认关闭）
+networkPolicy:
+  enabled: false
+  # 允许访问 metrics 的来源：默认仅限带有该标签的命名空间
+  namespaceSelector:
+    matchLabels:
+      metrics: enabled

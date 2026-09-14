@@ -6,7 +6,6 @@ import (
 	"crypto/x509"
 	"fmt"
 	"log"
-	"net"
 	"net/url"
 	"slices"
 	"strings"
@@ -276,7 +275,7 @@ func createCMCertificateConfig(ec *ecv1alpha1.EtcdCluster) (*certInterface.Confi
 	if cmConfig.AltNames.DNSNames != nil {
 		getAltNames = certInterface.AltNames{
 			DNSNames: cmConfig.AltNames.DNSNames,
-			IPs:      make([]net.IP, len(cmConfig.AltNames.DNSNames)),
+			IPs:      cmConfig.AltNames.IPs,
 		}
 	} else {
 		defaultDNSNames := []string{
@@ -318,7 +317,7 @@ func createAutoCertificateConfig(ec *ecv1alpha1.EtcdCluster) (*certInterface.Con
 	if autoConfig.AltNames.DNSNames != nil {
 		altNames = certInterface.AltNames{
 			DNSNames: autoConfig.AltNames.DNSNames,
-			IPs:      make([]net.IP, len(autoConfig.AltNames.DNSNames)),
+			IPs:      autoConfig.AltNames.IPs,
 		}
 	} else {
 		defaultDNSNames := []string{

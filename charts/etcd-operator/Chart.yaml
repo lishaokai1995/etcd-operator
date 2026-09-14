@@ -1,0 +1,11 @@
+apiVersion: v2
+name: etcd-operator
+description: A Helm chart for the official Kubernetes etcd operator (operator.etcd.io)
+type: application
+version: 0.1.0
+appVersion: "v0.1.0"
+home: https://github.com/etcd-io/etcd-operator
+keywords:
+  - etcd
+  - operator
+kubeVersion: ">=1.29.0-0"
