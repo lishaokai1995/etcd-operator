@@ -330,7 +330,7 @@ func (r *EtcdClusterReconciler) reconcileExternalAccess(ctx context.Context, log
 
 		ports = append(ports, ecv1alpha1.ExternalAccessPortStatus{
 			Ordinal:  int32(ordinal),
-			NodePort: nodePortOf(svc, port, cfg.NodePort, ordinal),
+			NodePort: nodePortOf(svc, cfg.NodePort, ordinal),
 		})
 	}
 
@@ -395,7 +395,7 @@ func newExternalService(ec *ecv1alpha1.EtcdCluster, ordinal int, port, pinned in
 // NodePort is deliberately left untouched: once the API server allocates one it
 // is immutable in practice, and re-setting a pinned value that drifted would be
 // rejected. Port (the Service/target port) is safe to change.
-func updateExternalServicePorts(svc *corev1.Service, port, pinned int32, ordinal int) bool {
+func updateExternalServicePorts(svc *corev1.Service, port int32) bool {
 	changed := false
 	for i := range svc.Spec.Ports {
 		p := &svc.Spec.Ports[i]
