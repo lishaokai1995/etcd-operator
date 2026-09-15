@@ -67,6 +67,34 @@ type EtcdClusterSpec struct {
 	// should turn it back off once the cluster is healthy again.
 	// +optional
 	AllowVersionUpgradeOnRepair bool `json:"allowVersionUpgradeOnRepair,omitempty"`
+	// ExternalAccess configures a per-member NodePort Service so the cluster
+	// can be reached from outside the Kubernetes cluster. When enabled, the
+	// operator creates one NodePort Service per member ordinal (named
+	// {cluster}-{ordinal}-external), each selecting exactly its own member
+	// Pod via the operator.etcd.io/member-ordinal label. Services are
+	// reconciled against Size: scaling up/down or disabling adds/removes
+	// them automatically. The assigned node ports are reported in
+	// Status.ExternalAccessPorts.
+	// +optional
+	ExternalAccess *ExternalAccessSpec `json:"externalAccess,omitempty"`
+}
+
+// ExternalAccessSpec configures per-member NodePort Services for
+// out-of-cluster access to this EtcdCluster.
+type ExternalAccessSpec struct {
+	// Enabled turns per-member NodePort Services on or off. When false or
+	// the whole block is absent, any previously created Services are deleted.
+	Enabled bool `json:"enabled"`
+	// Port is the etcd client port exposed by each Service (Service port and
+	// targetPort). Defaults to 2379 when unset.
+	// +optional
+	Port int32 `json:"port,omitempty"`
+	// NodePort optionally pins the port allocated on every cluster node.
+	// When unset, Kubernetes assigns a random port from the configured
+	// NodePort range. When set, member ordinal N gets NodePort+N; ensure the
+	// whole span stays inside the allowed range and free on every node.
+	// +optional
+	NodePort int32 `json:"nodePort,omitempty"`
 }
 
 type PodTemplate struct {
@@ -228,6 +256,15 @@ type EtcdClusterStatus struct {
 	// However, 'id' is more canonical once a member is part of the cluster.
 	Members []MemberStatus `json:"members,omitempty"`
 
+	// ExternalAccessPorts reports the NodePort currently allocated for each
+	// member's external-access Service, so clients can discover the
+	// out-of-cluster access ports via `kubectl get etcdcluster`. Populated
+	// only when Spec.ExternalAccess is enabled; empty otherwise.
+	// +optional
+	// +listType=map
+	// +listMapKey=ordinal
+	ExternalAccessPorts []ExternalAccessPortStatus `json:"externalAccessPorts,omitempty"`
+
 	// Conditions represent the latest available observations of the EtcdCluster's state.
 	// +optional
 	// +patchMergeKey=type
@@ -270,6 +307,18 @@ type QuorumRecoveryStatus struct {
 	// and terminating every other member needs to know exactly which one to
 	// spare.
 	Survivor int `json:"survivor"`
+}
+
+// ExternalAccessPortStatus reports the NodePort allocated for one member's
+// external-access Service.
+type ExternalAccessPortStatus struct {
+	// Ordinal is the member's ordinal, matching the {cluster}-{ordinal} Pod.
+	Ordinal int32 `json:"ordinal"`
+
+	// NodePort is the port allocated on every cluster node for this member,
+	// either the pinned Spec.ExternalAccess.NodePort+ordinal or the value
+	// Kubernetes assigned randomly.
+	NodePort int32 `json:"nodePort"`
 }
 
 // MemberStatus defines the observed state of a single etcd member.

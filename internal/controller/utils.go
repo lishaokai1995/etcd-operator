@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -60,6 +62,19 @@ func etcdClusterLabels(ec *ecv1alpha1.EtcdCluster) map[string]string {
 // clusterNameLabel marks cluster-owned objects with their EtcdCluster's name,
 // letting owned objects be selected by label.
 const clusterNameLabel = "operator.etcd.io/cluster"
+
+// memberOrdinalLabel distinguishes each member Pod within a cluster by its
+// ordinal, letting per-member Services (e.g. NodePort exposure of a single
+// member) select exactly one Pod. Unlike etcdClusterLabels it is unique per
+// member and is applied automatically on every Pod build, so it survives
+// Pod recreation without manual kubectl labeling.
+const memberOrdinalLabel = "operator.etcd.io/member-ordinal"
+
+// etcdMemberLabels returns the per-member label set added to each member Pod
+// on top of etcdClusterLabels, keyed by the member's ordinal.
+func etcdMemberLabels(ordinal int) map[string]string {
+	return map[string]string{memberOrdinalLabel: strconv.Itoa(ordinal)}
+}
 
 // clusterNameLabels returns the label set that marks objects (EtcdMembers,
 // PVCs) with the name of the cluster they belong to, letting them be
@@ -205,6 +220,234 @@ func createHeadlessServiceIfNotExist(ctx context.Context, logger logr.Logger, c 
 		return fmt.Errorf("failed to get headless service: %w", err)
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// External access (per-member NodePort Services)
+// ---------------------------------------------------------------------------
+
+// externalServiceName returns the NodePort Service name for one member.
+func externalServiceName(clusterName string, ordinal int) string {
+	return fmt.Sprintf("%s-%d-external", clusterName, ordinal)
+}
+
+// externalServiceLabels returns the label set for a member's external Service:
+// the cluster identity labels (so it can be found by cluster) plus the
+// per-member ordinal label.
+func externalServiceLabels(ec *ecv1alpha1.EtcdCluster, ordinal int) map[string]string {
+	labels := etcdClusterLabels(ec)
+	for k, v := range etcdMemberLabels(ordinal) {
+		labels[k] = v
+	}
+	return labels
+}
+
+// reconcileExternalAccess converges the cluster's per-member NodePort Services
+// to the desired state derived from Spec.ExternalAccess and Spec.Size:
+//   - disabled (nil or Enabled=false): deletes every existing external Service
+//     and clears s.externalAccessPorts.
+//   - enabled: ensures one Service per ordinal in [0, Size), each selecting
+//     exactly its member Pod via the operator.etcd.io/member-ordinal label, and
+//     deletes any Service whose ordinal is now out of range (scale-down).
+//
+// The NodePort observed on each live Service is collected into
+// s.externalAccessPorts for updateStatus to surface. Runs unconditionally every
+// reconcile alongside the other cluster prerequisites.
+func (r *EtcdClusterReconciler) reconcileExternalAccess(ctx context.Context, logger logr.Logger, s *reconcileState) error {
+	ec := s.cluster
+	ns := ec.Namespace
+
+	// List every external Service this cluster already owns, so both the
+	// enable and disable paths can reconcile against it and prune orphans.
+	existing := &corev1.ServiceList{}
+	if err := r.List(ctx, existing,
+		client.InNamespace(ns),
+		client.MatchingLabels(etcdClusterLabels(ec)),
+	); err != nil {
+		return fmt.Errorf("failed to list external services: %w", err)
+	}
+
+	cfg := ec.Spec.ExternalAccess
+	if cfg == nil || !cfg.Enabled {
+		// Disabled: delete all owned external Services, then clear the report.
+		for i := range existing.Items {
+			if !isExternalService(&existing.Items[i]) {
+				continue
+			}
+			if err := r.Delete(ctx, &existing.Items[i]); err != nil && !k8serrors.IsNotFound(err) {
+				return fmt.Errorf("failed to delete external service %s: %w", existing.Items[i].Name, err)
+			}
+			logger.Info("Deleted external access Service", "service", existing.Items[i].Name)
+		}
+		s.externalAccessPorts = nil
+		return nil
+	}
+
+	port := cfg.Port
+	if port == 0 {
+		port = 2379
+	}
+
+	// Track which ordinals are still desired so we can prune the rest.
+	desired := make(map[int]struct{}, ec.Spec.Size)
+	ports := make([]ecv1alpha1.ExternalAccessPortStatus, 0, ec.Spec.Size)
+
+	for ordinal := 0; ordinal < ec.Spec.Size; ordinal++ {
+		desired[ordinal] = struct{}{}
+		name := externalServiceName(ec.Name, ordinal)
+
+		svc := &corev1.Service{}
+		err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, svc)
+		if k8serrors.IsNotFound(err) {
+			svc = newExternalService(ec, ordinal, port, cfg.NodePort)
+			if err := controllerutil.SetControllerReference(ec, svc, r.Scheme); err != nil {
+				return fmt.Errorf("failed to set owner reference on external service %s: %w", name, err)
+			}
+			if err := r.Create(ctx, svc); err != nil {
+				if k8serrors.IsAlreadyExists(err) {
+					// Another reconcile created it concurrently; re-fetch below.
+					if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, svc); err != nil {
+						return fmt.Errorf("failed to get external service %s after create race: %w", name, err)
+					}
+				} else {
+					return fmt.Errorf("failed to create external service %s: %w", name, err)
+				}
+			} else {
+				logger.Info("Created external access Service", "service", name)
+			}
+		} else if err != nil {
+			return fmt.Errorf("failed to get external service %s: %w", name, err)
+		} else {
+			// Exists: reconcile the port spec, preserving the cluster-assigned
+			// NodePort (never re-set it, or the API server rejects the change).
+			if updateExternalServicePorts(svc, port) {
+				if err := r.Update(ctx, svc); err != nil {
+					return fmt.Errorf("failed to update external service %s: %w", name, err)
+				}
+				logger.Info("Updated external access Service", "service", name)
+			}
+		}
+
+		ports = append(ports, ecv1alpha1.ExternalAccessPortStatus{
+			Ordinal:  int32(ordinal),
+			NodePort: nodePortOf(svc, port, cfg.NodePort, ordinal),
+		})
+	}
+
+	// Prune external Services whose ordinal is no longer desired (scale-down or
+	// a name that changed). Only touch Services we recognize as ours.
+	for i := range existing.Items {
+		svc := &existing.Items[i]
+		if !isExternalService(svc) {
+			continue
+		}
+		ordinal, ok := ordinalFromExternalService(svc, ec.Name)
+		if !ok {
+			continue
+		}
+		if _, keep := desired[ordinal]; keep {
+			continue
+		}
+		if err := r.Delete(ctx, svc); err != nil && !k8serrors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete stale external service %s: %w", svc.Name, err)
+		}
+		logger.Info("Deleted stale external access Service", "service", svc.Name)
+	}
+
+	slices.SortFunc(ports, func(a, b ecv1alpha1.ExternalAccessPortStatus) int {
+		return int(a.Ordinal) - int(b.Ordinal)
+	})
+	s.externalAccessPorts = ports
+	return nil
+}
+
+// newExternalService builds a per-member NodePort Service. When pinned is
+// non-zero it sets an explicit nodePort (pinned+ordinal); otherwise the API
+// server allocates one from the cluster's NodePort range.
+func newExternalService(ec *ecv1alpha1.EtcdCluster, ordinal int, port, pinned int32) *corev1.Service {
+	nodePorts := []corev1.ServicePort{
+		{
+			Name:       "client",
+			Port:       port,
+			Protocol:   corev1.ProtocolTCP,
+			TargetPort: intstr.FromInt32(port),
+		},
+	}
+	if pinned != 0 {
+		nodePorts[0].NodePort = pinned + int32(ordinal)
+	}
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      externalServiceName(ec.Name, ordinal),
+			Namespace: ec.Namespace,
+			Labels:    externalServiceLabels(ec, ordinal),
+		},
+		Spec: corev1.ServiceSpec{
+			Type:     corev1.ServiceTypeNodePort,
+			Selector: externalServiceLabels(ec, ordinal),
+			Ports:    nodePorts,
+		},
+	}
+}
+
+// updateExternalServicePorts aligns an existing external Service's client port
+// with the desired spec and reports whether anything changed. The assigned
+// NodePort is deliberately left untouched: once the API server allocates one it
+// is immutable in practice, and re-setting a pinned value that drifted would be
+// rejected. Port (the Service/target port) is safe to change.
+func updateExternalServicePorts(svc *corev1.Service, port, pinned int32, ordinal int) bool {
+	changed := false
+	for i := range svc.Spec.Ports {
+		p := &svc.Spec.Ports[i]
+		if p.Port != port {
+			p.Port = port
+			changed = true
+		}
+		if p.TargetPort.IntValue() != int(port) {
+			p.TargetPort = intstr.FromInt32(port)
+			changed = true
+		}
+	}
+	return changed
+}
+
+// nodePortOf returns the NodePort to report for a Service: the live value the
+// API server assigned once allocated, else the pinned value, else 0 (still
+// pending allocation).
+func nodePortOf(svc *corev1.Service, pinned int32, ordinal int) int32 {
+	for i := range svc.Spec.Ports {
+		if svc.Spec.Ports[i].NodePort != 0 {
+			return svc.Spec.Ports[i].NodePort
+		}
+	}
+	if pinned != 0 {
+		return pinned + int32(ordinal)
+	}
+	return 0
+}
+
+// isExternalService reports whether a Service is one of the operator-managed
+// per-member external NodePort Services (vs the headless cluster Service).
+func isExternalService(svc *corev1.Service) bool {
+	_, ok := svc.Labels[memberOrdinalLabel]
+	return ok && svc.Spec.Type == corev1.ServiceTypeNodePort
+}
+
+// ordinalFromExternalService extracts the member ordinal from a Service's
+// operator.etcd.io/member-ordinal label.
+func ordinalFromExternalService(svc *corev1.Service, clusterName string) (int, bool) {
+	if svc.Labels["app"] != clusterName {
+		return 0, false
+	}
+	v, ok := svc.Labels[memberOrdinalLabel]
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // peerEndpointForOrdinalIndex returns the member name and peer URL for a given

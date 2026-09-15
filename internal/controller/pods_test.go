@@ -511,11 +511,12 @@ func TestCreateMemberPodWithLabels(t *testing.T) {
 				},
 			},
 			expectedLabels: map[string]string{
-				"app":         "test-etcd",
-				"controller":  "test-etcd",
-				"environment": "production",
-				"version":     "v1.0.0",
-				"team":        "platform",
+				"app":                             "test-etcd",
+				"controller":                      "test-etcd",
+				"operator.etcd.io/member-ordinal": "0",
+				"environment":                     "production",
+				"version":                         "v1.0.0",
+				"team":                            "platform",
 			},
 		},
 		{
@@ -534,8 +535,9 @@ func TestCreateMemberPodWithLabels(t *testing.T) {
 				Metadata: &ecv1alpha1.PodMetadata{Labels: map[string]string{}},
 			},
 			expectedLabels: map[string]string{
-				"app":        "test-etcd-empty-labels",
-				"controller": "test-etcd-empty-labels",
+				"app":                             "test-etcd-empty-labels",
+				"controller":                      "test-etcd-empty-labels",
+				"operator.etcd.io/member-ordinal": "0",
 			},
 		},
 		{
@@ -551,9 +553,10 @@ func TestCreateMemberPodWithLabels(t *testing.T) {
 				},
 			},
 			expectedLabels: map[string]string{
-				"app":         "test-etcd-override",
-				"controller":  "test-etcd-override",
-				"environment": "staging",
+				"app":                             "test-etcd-override",
+				"controller":                      "test-etcd-override",
+				"operator.etcd.io/member-ordinal": "0",
+				"environment":                     "staging",
 			},
 		},
 	}

@@ -67,12 +67,13 @@ type EtcdClusterReconciler struct {
 
 // reconcileState holds all transient data for a single reconciliation loop.
 type reconcileState struct {
-	cluster        *ecv1alpha1.EtcdCluster      // cluster CR being reconciled
-	members        []ecv1alpha1.EtcdMember      // EtcdMembers owned by this cluster, sorted by ordinal
-	pods           []*corev1.Pod                // member pods owned by this cluster, sorted by ordinal
-	memberListResp *clientv3.MemberListResponse // member list fetched from the etcd cluster
-	health         *etcdutils.ClusterHealth     // cluster/member health and active alarms from the latest health check
-	tlsConfig      *tls.Config                  // etcd client TLS config used by every etcdutils call in this loop (nil for non-TLS clusters)
+	cluster             *ecv1alpha1.EtcdCluster      // cluster CR being reconciled
+	members             []ecv1alpha1.EtcdMember      // EtcdMembers owned by this cluster, sorted by ordinal
+	pods                []*corev1.Pod                // member pods owned by this cluster, sorted by ordinal
+	memberListResp      *clientv3.MemberListResponse // member list fetched from the etcd cluster
+	health              *etcdutils.ClusterHealth     // cluster/member health and active alarms from the latest health check
+	tlsConfig           *tls.Config                  // etcd client TLS config used by every etcdutils call in this loop (nil for non-TLS clusters)
+	externalAccessPorts []ecv1alpha1.ExternalAccessPortStatus
 }
 
 // +kubebuilder:rbac:groups=operator.etcd.io,resources=etcdclusters,verbs=get;list;watch;create;update;patch;delete
@@ -383,7 +384,14 @@ func (r *EtcdClusterReconciler) ensureClusterPrereqs(ctx context.Context, s *rec
 	s.tlsConfig = clientTLS
 
 	// Service must exist before pods start so that headless DNS resolves.
-	return createHeadlessServiceIfNotExist(ctx, logger, r.Client, s.cluster, r.Scheme)
+	if err := createHeadlessServiceIfNotExist(ctx, logger, r.Client, s.cluster, r.Scheme); err != nil {
+		return err
+	}
+
+	// Per-member NodePort Services for out-of-cluster access. Idempotent and
+	// reconciled against Size every loop, so scale up/down and enabling/
+	// disabling external access converge without a dedicated watch.
+	return r.reconcileExternalAccess(ctx, logger, s)
 }
 
 // refreshClusterState fetches the live etcd member list and cluster/member
@@ -777,6 +785,11 @@ func (r *EtcdClusterReconciler) updateStatus(ctx context.Context, s *reconcileSt
 	}
 
 	r.updateConditions(s)
+
+	// External-access NodePort report, collected by reconcileExternalAccess
+	// during the prerequisites phase. Always assigned so a disabled cluster
+	// clears any previously reported ports.
+	s.cluster.Status.ExternalAccessPorts = s.externalAccessPorts
 
 	if err := r.Status().Update(ctx, s.cluster); err != nil {
 		logger.Error(err, "Failed to update EtcdCluster status")

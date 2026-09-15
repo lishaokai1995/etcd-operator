@@ -311,12 +311,15 @@ func buildMemberPod(
 ) (*corev1.Pod, error) {
 	podName := memberPodName(ec.Name, member.Spec.Ordinal)
 	// Start with custom labels then overwrite with the mandatory defaults so
-	// that the headless-service selector is always satisfied.
+	// that the headless-service selector is always satisfied. The per-member
+	// ordinal label is applied last so no user-supplied label can collide with
+	// it, and it survives Pod recreation automatically.
 	labels := make(map[string]string)
 	if ec.Spec.PodTemplate != nil && ec.Spec.PodTemplate.Metadata != nil {
 		maps.Copy(labels, ec.Spec.PodTemplate.Metadata.Labels)
 	}
 	maps.Copy(labels, etcdClusterLabels(ec))
+	maps.Copy(labels, etcdMemberLabels(member.Spec.Ordinal))
 
 	// Apply annotations from EtcdCluster and add additional annnotations required by etcd operator
 	annotations := make(map[string]string)
