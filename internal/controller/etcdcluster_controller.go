@@ -253,6 +253,10 @@ func (r *EtcdClusterReconciler) validateSpec(ctx context.Context, s *reconcileSt
 		return err
 	}
 
+	if err := r.validateExternalAccess(ctx, s.cluster); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -338,6 +342,39 @@ func (r *EtcdClusterReconciler) validateStorageSpec(ctx context.Context, ec *ecv
 			storageSpec.VolumeSizeLimit.String(), storageSpec.VolumeSizeRequest.String())
 		logger.Error(err, "Invalid StorageSpec")
 		return err
+	}
+
+	return nil
+}
+
+// validateExternalAccess rejects externalAccess settings that would make
+// Service creation fail forever (and thus wedge the reconcile loop in a
+// retry cycle). The NodePort span [nodePort, nodePort+size-1] must stay
+// inside the default 30000-32767 range; clusters with a customized
+// --service-node-port-range must leave nodePort unset (random allocation).
+func (r *EtcdClusterReconciler) validateExternalAccess(ctx context.Context, ec *ecv1alpha1.EtcdCluster) error {
+	logger := log.FromContext(ctx)
+
+	cfg := ec.Spec.ExternalAccess
+	if cfg == nil || !cfg.Enabled {
+		return nil
+	}
+
+	if cfg.Port < 1 || cfg.Port > 65535 {
+		err := fmt.Errorf("invalid externalAccess.port %d: must be within 1-65535", cfg.Port)
+		logger.Error(err, "Invalid ExternalAccess")
+		return err
+	}
+
+	if cfg.NodePort != 0 {
+		const minNodePort, maxNodePort = int32(30000), int32(32767)
+		last := cfg.NodePort + int32(ec.Spec.Size) - 1
+		if cfg.NodePort < minNodePort || last > maxNodePort {
+			err := fmt.Errorf("invalid externalAccess.nodePort %d: the span %d-%d (nodePort..nodePort+size-1) must stay within %d-%d",
+				cfg.NodePort, cfg.NodePort, last, minNodePort, maxNodePort)
+			logger.Error(err, "Invalid ExternalAccess")
+			return err
+		}
 	}
 
 	return nil

@@ -17,7 +17,9 @@ limitations under the License.
 package controller
 
 import (
+	"fmt"
 	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -31,6 +33,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	ecv1alpha1 "go.etcd.io/etcd-operator/api/v1alpha1"
 	"go.etcd.io/etcd-operator/internal/etcdutils"
@@ -430,7 +433,8 @@ func TestEnsureClusterPrereqs(t *testing.T) {
 
 	t.Run("Creates headless Service when missing", func(t *testing.T) {
 		ctx := t.Context()
-		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ec).Build()
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ec).
+			WithStatusSubresource(&ecv1alpha1.EtcdCluster{}).Build()
 		r := &EtcdClusterReconciler{Client: fakeClient, Scheme: scheme}
 		state := &reconcileState{cluster: ec}
 
@@ -449,13 +453,207 @@ func TestEnsureClusterPrereqs(t *testing.T) {
 			Spec:       corev1.ServiceSpec{ClusterIP: "None"},
 		}
 
-		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ec, svc).Build()
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ec, svc).
+			WithStatusSubresource(&ecv1alpha1.EtcdCluster{}).Build()
 		r := &EtcdClusterReconciler{Client: fakeClient, Scheme: scheme}
 		state := &reconcileState{cluster: ec}
 
 		err := r.ensureClusterPrereqs(ctx, state)
 		assert.NoError(t, err)
 	})
+}
+
+// TestReconcileExternalAccess verifies the per-member NodePort Service
+// lifecycle: creation on enable, pruning on scale-down, deletion on disable,
+// and the NodePort report collected for status.
+func TestReconcileExternalAccess(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = ecv1alpha1.AddToScheme(scheme)
+
+	newCluster := func(size int, enabled bool) *ecv1alpha1.EtcdCluster {
+		return &ecv1alpha1.EtcdCluster{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-etcd",
+				Namespace: "default",
+				UID:       types.UID("1"),
+			},
+			Spec: ecv1alpha1.EtcdClusterSpec{
+				Size:    size,
+				Version: "3.5.17",
+				ExternalAccess: &ecv1alpha1.ExternalAccessSpec{
+					Enabled: enabled,
+				},
+			},
+		}
+	}
+
+	t.Run("creates one NodePort Service per member when enabled", func(t *testing.T) {
+		ctx := t.Context()
+		ec := newCluster(3, true)
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ec).Build()
+		r := &EtcdClusterReconciler{Client: fakeClient, Scheme: scheme}
+		state := &reconcileState{cluster: ec}
+
+		require.NoError(t, r.reconcileExternalAccess(ctx, log.FromContext(ctx), state))
+
+		for ordinal := 0; ordinal < 3; ordinal++ {
+			svc := &corev1.Service{}
+			require.NoError(t, fakeClient.Get(ctx,
+				types.NamespacedName{Name: fmt.Sprintf("test-etcd-%d-external", ordinal), Namespace: "default"}, svc))
+			assert.Equal(t, corev1.ServiceTypeNodePort, svc.Spec.Type)
+			assert.Equal(t, "test-etcd", svc.Spec.Selector["app"])
+			assert.Equal(t, strconv.Itoa(ordinal), svc.Spec.Selector[memberOrdinalLabel])
+			require.Len(t, svc.Spec.Ports, 1)
+			assert.Equal(t, int32(2379), svc.Spec.Ports[0].Port)
+		}
+
+		// Random allocation pending: fake client assigns no NodePort, so the
+		// report carries 0 until the API server fills it in.
+		require.Len(t, state.externalAccessPorts, 3)
+		for i, p := range state.externalAccessPorts {
+			assert.Equal(t, int32(i), p.Ordinal)
+			assert.Equal(t, int32(0), p.NodePort)
+		}
+	})
+
+	t.Run("prunes Services beyond the desired size on scale-down", func(t *testing.T) {
+		ctx := t.Context()
+		ec := newCluster(2, true)
+		stale := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-etcd-2-external",
+				Namespace: "default",
+				Labels:    externalServiceLabels(ec, 2),
+			},
+			Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeNodePort},
+		}
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ec, stale).Build()
+		r := &EtcdClusterReconciler{Client: fakeClient, Scheme: scheme}
+		state := &reconcileState{cluster: ec}
+
+		require.NoError(t, r.reconcileExternalAccess(ctx, log.FromContext(ctx), state))
+
+		err := fakeClient.Get(ctx, types.NamespacedName{Name: "test-etcd-2-external", Namespace: "default"}, &corev1.Service{})
+		assert.True(t, apierrors.IsNotFound(err), "stale external Service should be deleted")
+		require.Len(t, state.externalAccessPorts, 2)
+	})
+
+	t.Run("deletes all Services and clears the report when disabled", func(t *testing.T) {
+		ctx := t.Context()
+		ec := newCluster(2, false)
+		keep := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-etcd-0-external",
+				Namespace: "default",
+				Labels:    externalServiceLabels(ec, 0),
+			},
+			Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeNodePort},
+		}
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ec, keep).Build()
+		r := &EtcdClusterReconciler{Client: fakeClient, Scheme: scheme}
+		state := &reconcileState{cluster: ec}
+
+		require.NoError(t, r.reconcileExternalAccess(ctx, log.FromContext(ctx), state))
+
+		err := fakeClient.Get(ctx, types.NamespacedName{Name: "test-etcd-0-external", Namespace: "default"}, &corev1.Service{})
+		assert.True(t, apierrors.IsNotFound(err), "external Service should be deleted when disabled")
+		assert.Nil(t, state.externalAccessPorts)
+	})
+
+	t.Run("reports pinned NodePorts", func(t *testing.T) {
+		ctx := t.Context()
+		ec := newCluster(2, true)
+		ec.Spec.ExternalAccess.NodePort = 32379
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ec).Build()
+		r := &EtcdClusterReconciler{Client: fakeClient, Scheme: scheme}
+		state := &reconcileState{cluster: ec}
+
+		require.NoError(t, r.reconcileExternalAccess(ctx, log.FromContext(ctx), state))
+
+		require.Len(t, state.externalAccessPorts, 2)
+		assert.Equal(t, int32(32379), state.externalAccessPorts[0].NodePort)
+		assert.Equal(t, int32(32380), state.externalAccessPorts[1].NodePort)
+	})
+}
+
+// TestValidateExternalAccess verifies the NodePort span and port range checks.
+func TestValidateExternalAccess(t *testing.T) {
+	cases := []struct {
+		name   string
+		cfg    *ecv1alpha1.ExternalAccessSpec
+		size   int
+		assert func(t *testing.T, err error)
+	}{
+		{
+			name: "nil config is a no-op",
+			assert: func(t *testing.T, err error) {
+				assert.NoError(t, err)
+			},
+		},
+		{
+			name: "disabled config is a no-op",
+			cfg:  &ecv1alpha1.ExternalAccessSpec{Enabled: false, NodePort: 1},
+			assert: func(t *testing.T, err error) {
+				assert.NoError(t, err)
+			},
+		},
+		{
+			name: "random allocation is valid",
+			cfg:  &ecv1alpha1.ExternalAccessSpec{Enabled: true},
+			size: 3,
+			assert: func(t *testing.T, err error) {
+				assert.NoError(t, err)
+			},
+		},
+		{
+			name: "pinned span inside the range is valid",
+			cfg:  &ecv1alpha1.ExternalAccessSpec{Enabled: true, NodePort: 32765},
+			size: 3,
+			assert: func(t *testing.T, err error) {
+				assert.NoError(t, err)
+			},
+		},
+		{
+			name: "pinned span overflowing the range is rejected",
+			cfg:  &ecv1alpha1.ExternalAccessSpec{Enabled: true, NodePort: 32766},
+			size: 3,
+			assert: func(t *testing.T, err error) {
+				assert.Error(t, err)
+			},
+		},
+		{
+			name: "pinned port below the range is rejected",
+			cfg:  &ecv1alpha1.ExternalAccessSpec{Enabled: true, NodePort: 29999},
+			size: 1,
+			assert: func(t *testing.T, err error) {
+				assert.Error(t, err)
+			},
+		},
+		{
+			name: "invalid client port is rejected",
+			cfg:  &ecv1alpha1.ExternalAccessSpec{Enabled: true, Port: 70000},
+			size: 1,
+			assert: func(t *testing.T, err error) {
+				assert.Error(t, err)
+			},
+		},
+	}
+
+	r := &EtcdClusterReconciler{}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ec := &ecv1alpha1.EtcdCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "etcd", Namespace: "default"},
+				Spec:       ecv1alpha1.EtcdClusterSpec{Size: tc.size, ExternalAccess: tc.cfg},
+			}
+			if tc.size == 0 {
+				ec.Spec.Size = 1
+			}
+			err := r.validateExternalAccess(t.Context(), ec)
+			tc.assert(t, err)
+		})
+	}
 }
 
 // TestScaleCluster verifies that scaling only changes the desired set of

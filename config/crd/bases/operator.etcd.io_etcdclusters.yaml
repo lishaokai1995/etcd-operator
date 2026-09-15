@@ -80,6 +80,8 @@ spec:
                       NodePort range. When set, member ordinal N gets NodePort+N; ensure the
                       whole span stays inside the allowed range and free on every node.
                     format: int32
+                    maximum: 32767
+                    minimum: 30000
                     type: integer
                   port:
                     description: |-

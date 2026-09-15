@@ -94,6 +94,8 @@ type ExternalAccessSpec struct {
 	// NodePort range. When set, member ordinal N gets NodePort+N; ensure the
 	// whole span stays inside the allowed range and free on every node.
 	// +optional
+	// +kubebuilder:validation:Minimum=30000
+	// +kubebuilder:validation:Maximum=32767
 	NodePort int32 `json:"nodePort,omitempty"`
 }
 
